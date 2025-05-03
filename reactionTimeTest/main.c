@@ -1,4 +1,5 @@
-// Lab 5 Solution
+/*
+// Reaction Time Test w/ UART & Push Button
 // Nicholas Nhat Tran
 // 1002027150
 
@@ -30,16 +31,12 @@
 
 // Bitband aliases
 #define RED_LED      (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 1*4)))
-#define BLUE_LED     (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 2*4)))
 #define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 3*4)))
-#define PURPLE_LED   (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 5*4)))
 #define PUSH_BUTTON  (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 4*4)))
 
 // PortF masks
 #define RED_LED_MASK 2
-#define BLUE_LED_MASK 4
 #define GREEN_LED_MASK 8
-#define PURPLE_LED_MASK 32
 #define PUSH_BUTTON_MASK 16
 
 // Globals
@@ -62,10 +59,10 @@ void initHw(void)
     SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R5;
     _delay_cycles(3);
 
-    GPIO_PORTF_DIR_R |= GREEN_LED_MASK | RED_LED_MASK | BLUE_LED_MASK | PURPLE_LED_MASK;
+    GPIO_PORTF_DIR_R |= GREEN_LED_MASK | RED_LED_MASK;
     GPIO_PORTF_DIR_R &= ~PUSH_BUTTON_MASK;
 
-    GPIO_PORTF_DEN_R |= PUSH_BUTTON_MASK | GREEN_LED_MASK | RED_LED_MASK | BLUE_LED_MASK | PURPLE_LED_MASK;
+    GPIO_PORTF_DEN_R |= PUSH_BUTTON_MASK | GREEN_LED_MASK | RED_LED_MASK;
     GPIO_PORTF_PUR_R |= PUSH_BUTTON_MASK;
 }
 
@@ -81,15 +78,7 @@ void manageCurrentColor()
     }
 }
 
-void changeColor()
-{
-    while(PUSH_BUTTON);
-    RED_LED = (0b0001 & currentColor);
-    BLUE_LED = (0b0010 & currentColor) >> 1;
-    GREEN_LED = (0b0100 & currentColor) >> 2;
-    manageCurrentColor();
-    waitMicrosecond(250000);
-}
+
 
 //-----------------------------------------------------------------------------
 // Main
@@ -106,3 +95,4 @@ int main()
         changeColor();
     }
 }
+*/
