@@ -1,4 +1,4 @@
-// Lab 2: Interfacing MCP23008 with TM4C123G for LED Control
+// Final Project: Self-Balancing Robot using ICM-20948 IMU sensor
 // Nicholas Nhat Tran
 // 1002027150
 
@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <math.h>
 #include "tm4c123gh6pm.h"
 #include "i2c0.h"
 #include "gpio.h"
@@ -32,6 +33,12 @@
 #include "clock.h"
 #include "uart0.h"
 #include "icm20948.h"
+#include "pwm.h"
+
+#define IN1      (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 4*4))) // Port B4
+#define IN2      (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 5*4))) // Port B5
+#define IN1_MASK 16
+#define IN2_MASK 32
 
 #define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 3*4)))
 #define GREEN_LED_MASK 8
@@ -47,10 +54,11 @@
 //-----------------------------------------------------------------------------
 bool isForward = true; // toggle between normal and reverse sequences
 uint8_t currentLED = 0b00001;
-float gyroOffsetX;
-float gyroOffsetY;
-float gyroOffsetZ;
-
+float gyroOffsetX, gyroOffsetY, gyroOffsetZ;
+float gyroX, gyroY, gyroZ;
+float acceX, acceY, acceZ;
+float pitch = 0.0f;
+float roll = 0.0f;
 
 //-----------------------------------------------------------------------------
 // Subroutines
@@ -63,27 +71,15 @@ void initHw()
 
     // Configure PF4 for pushbutton using GPIO library
     enablePort(PORTF);                  // Enable Port F
-    selectPinDigitalInput(PORTF, 4);    // Set PF4 as input               // Enable Port F
+    enablePort(PORTB);
+    selectPinDigitalInput(PORTF, 4); // Set PF4 as input               // Enable Port F
     GPIO_PORTF_DIR_R |= GREEN_LED_MASK;
     GPIO_PORTF_DEN_R |= GREEN_LED_MASK;
+
+    GPIO_PORTB_DIR_R |= IN1_MASK | IN2_MASK;
+    GPIO_PORTB_DEN_R |= IN1_MASK | IN2_MASK;
     enablePinPullup(PORTF, 4);          // Enable pull-up resistor for PF4
 
-}
-
-// LED control logic
-void setNextLED()
-{
-    if (isForward)
-    {
-        currentLED = (currentLED >> 1) | (currentLED << 4);
-        writeI2c0Register(addrMCP23008, RegGPIO, currentLED);
-    }
-    else
-    {
-        currentLED = (currentLED << 1) | (currentLED >> 4);
-        writeI2c0Register(addrMCP23008, RegGPIO, currentLED);
-    }
-    waitMicrosecond(500000);
 }
 
 void initICM20948()
@@ -145,6 +141,35 @@ void initICM20948()
     waitMicrosecond(1000);
 }
 
+void initTimer()
+{
+    // Enable Timer1 Clock
+    SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1;
+    // Dummy read/wait to ensure clock is active
+    while ((SYSCTL_PRTIMER_R & SYSCTL_PRTIMER_R1) == 0)
+    {
+    };
+
+    // Disable Timer A during configuration
+    TIMER1_CTL_R &= ~TIMER_CTL_TAEN;
+
+    // Configure for 32-bit timer mode
+    TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;
+
+    // Configure Timer A for Periodic mode, default down-count
+    TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD;
+
+    // Set the load value to maximum for longest period before wrap-around
+    TIMER1_TAILR_R = 0xFFFFFFFF;
+
+    // Clear any interrupts (we are polling the value)
+    TIMER1_IMR_R = 0;
+    TIMER1_ICR_R = TIMER_ICR_TATOCINT; // Clear timeout flag just in case
+
+    // Enable Timer A
+    TIMER1_CTL_R |= TIMER_CTL_TAEN;
+}
+
 void readGyroY()
 {
     char buffer[32];
@@ -174,11 +199,134 @@ void readGyroY()
     putsUart0(buffer);
 }
 
+void getGyroAndAccelerometerValues()
+{
+    uint8_t highByteX = readI2c0Register(ICM20948_ADDR, GYRO_XOUT_H);
+    uint8_t lowByteX = readI2c0Register(ICM20948_ADDR, GYRO_XOUT_L);
+    uint8_t highByteY = readI2c0Register(ICM20948_ADDR, GYRO_YOUT_H);
+    uint8_t lowByteY = readI2c0Register(ICM20948_ADDR, GYRO_YOUT_L);
+    uint8_t highByteZ = readI2c0Register(ICM20948_ADDR, GYRO_ZOUT_H);
+    uint8_t lowByteZ = readI2c0Register(ICM20948_ADDR, GYRO_ZOUT_L);
+
+    int16_t gyroRawX = (highByteX << 8 | lowByteX);
+    int16_t gyroRawY = (highByteY << 8 | lowByteY);
+    int16_t gyroRawZ = (highByteZ << 8 | lowByteZ);
+
+    gyroX = ((float) gyroRawX - gyroOffsetX) / 131.0f;
+    gyroY = ((float) gyroRawY - gyroOffsetY) / 131.0f;
+    gyroZ = ((float) gyroRawZ - gyroOffsetZ) / 131.0f;
+
+    /******** DEBUGGING ********
+     char buffer[32];
+     snprintf(buffer, 32, "GYRO_XOUT: %f\n", gyroX);
+     putsUart0(buffer);
+     snprintf(buffer, 32, "GYRO_YOUT: %f\n", gyroY);
+     putsUart0(buffer);
+     snprintf(buffer, 32, "GYRO_ZOUT: %f\n", gyroZ);
+     putsUart0(buffer);
+     ********* DEBUGGING ********/
+
+    highByteX = readI2c0Register(ICM20948_ADDR, ACCEL_XOUT_H);
+    lowByteX = readI2c0Register(ICM20948_ADDR, ACCEL_XOUT_L);
+    highByteY = readI2c0Register(ICM20948_ADDR, ACCEL_YOUT_H);
+    lowByteY = readI2c0Register(ICM20948_ADDR, ACCEL_YOUT_L);
+    highByteZ = readI2c0Register(ICM20948_ADDR, ACCEL_ZOUT_H);
+    lowByteZ = readI2c0Register(ICM20948_ADDR, ACCEL_ZOUT_L);
+
+    int16_t acceRawX = (highByteX << 8 | lowByteX);
+    int16_t acceRawY = (highByteY << 8 | lowByteY);
+    int16_t acceRawZ = (highByteZ << 8 | lowByteZ);
+
+    acceX = (float) acceRawX / 16384;
+    acceY = (float) acceRawY / 16384;
+    acceZ = (float) acceRawZ / 16384;
+
+    /******** DEBUGGING ********
+     snprintf(buffer, 32, "ACCE_XOUT: %f\n", acceX);
+     putsUart0(buffer);
+     snprintf(buffer, 32, "ACCE_YOUT: %f\n", acceY);
+     putsUart0(buffer);
+     snprintf(buffer, 32, "ACCE_ZOUT: %f\n", acceZ);
+     putsUart0(buffer);
+     ********* DEBUGGING ********/
+}
+
+void calculatePitchAndRoll()
+{
+    static uint32_t prevTimerVal = 0; // Stores value from previous call
+    static bool firstRun = true;             // Flag for first execution
+    float dt = 0.0f;                          // Initialize dt
+
+    uint32_t currentTimerVal = TIMER1_TAR_R;
+
+    if (!firstRun)
+    {
+        // Calculate elapsed ticks (handling wrap-around for DOWN counter)
+        uint32_t elapsedTicks;
+        if (currentTimerVal <= prevTimerVal)
+        {
+            // Normal down-count case (no wrap-around)
+            elapsedTicks = prevTimerVal - currentTimerVal;
+        }
+        else
+        {
+            // Wrap-around occurred (Timer counted down past 0 and reloaded)
+            elapsedTicks = prevTimerVal + (0xFFFFFFFF - currentTimerVal + 1);
+        }
+
+        // Store current value for the NEXT call
+        prevTimerVal = currentTimerVal;
+
+        // Convert elapsed ticks to seconds
+        dt = (float) elapsedTicks / 40000000;
+
+        // Invalid dt cases
+        if (dt > 0.1f) // If dt too large, cap it
+        {
+            dt = 0.1f;
+        }
+        else if (dt <= 0.0f) // If dt is somehow zero or negative, use a small positive value
+        {
+            dt = 0.001f; // Prevents division by zero/filter instability
+        }
+    }
+    else
+    {
+        // dt calculation requires a previous_timer_value,
+        prevTimerVal = currentTimerVal;
+        firstRun = false;
+        dt = 0.013762f; // Use a nominal dt (e.g., 10ms) for the very first calculation
+    }
+
+    getGyroAndAccelerometerValues();
+
+    float measuredPitchAngle = (atan(acceX / sqrt(acceY * acceY + acceZ * acceZ)) * 1 / (M_PI / 180));
+    float measuredRollAngle = (atan(acceY / sqrt(acceX * acceX + acceZ * acceZ)) * 1 / (M_PI / 180));
+
+    float lowpassPitch = pitch * 0.7 + measuredPitchAngle * 0.3;
+    float lowpassRoll = roll * 0.7 + measuredRollAngle * 0.3;
+
+    // Complementary filter
+
+    pitch = (0.97f) * (pitch + gyroY * dt) + (lowpassPitch * 0.03f);
+    roll = (0.97f) * (roll + gyroX * dt) + (lowpassRoll * 0.03f);
+
+    char buffer[32];
+    snprintf(buffer, 32, "dt: %f\n", dt);
+        putsUart0(buffer);
+    snprintf(buffer, 32, "pitch: %f\n", pitch);
+    putsUart0(buffer);
+    snprintf(buffer, 32, "roll: %f\n", roll);
+    putsUart0(buffer);
+
+}
+
 void runControllerLoop()
 {
 
 }
 
+// Getting calibration values to reduce gyroscope drifting
 void getGyroCalibrationValues()
 {
     // Ensure we're on BANK0 for gyro readings
@@ -213,20 +361,19 @@ void getGyroCalibrationValues()
         lowByteZ = readI2c0Register(ICM20948_ADDR, GYRO_ZOUT_L);
         int16_t gyroCaliValRawZ = (highByteZ << 8 | lowByteZ);
 
-
         gyroCaliValX += gyroCaliValRawX;
         gyroCaliValY += gyroCaliValRawY;
         gyroCaliValZ += gyroCaliValRawZ;
 
         waitMicrosecond(100);
     }
-    gyroOffsetX = (float)gyroCaliValX / 2000.0f;
+    gyroOffsetX = (float) gyroCaliValX / 2000.0f;
     snprintf(buffer, 32, "Gyro Offset (X): %f\n", gyroOffsetX);
     putsUart0(buffer);
-    gyroOffsetY = (float)gyroCaliValY / 2000.0f;
+    gyroOffsetY = (float) gyroCaliValY / 2000.0f;
     snprintf(buffer, 32, "Gyro Offset (Y): %f\n", gyroOffsetY);
     putsUart0(buffer);
-    gyroOffsetZ = (float)gyroCaliValZ / 2000.0f;
+    gyroOffsetZ = (float) gyroCaliValZ / 2000.0f;
     snprintf(buffer, 32, "Gyro Offset (Z): %f\n", gyroOffsetZ);
     putsUart0(buffer);
     waitMicrosecond(1000);
@@ -270,23 +417,63 @@ int main(void)
     initUart0();
     initI2c0();
     initICM20948();
+    initTimer();
+    initPwm();
 
     GREEN_LED = 0;
     setUart0BaudRate(115200, 40e6);
     testRegisterWhoAmI();
     getGyroCalibrationValues();
 
+    IN1 = 1;
+    IN2 = 0;
+    // Set threshold (Duty Cycle = Threshold / Load, Load = 20000)
 
-    //uint8_t reg = 0x07f;
-    //writeI2c0Register(reg, 0x00, 0x00);
-    // Configure MCP23008 GPIO pins
-    //writeI2c0Register(addrMCP23008, 0x00, 0x00);        // Set all GPIOs as output
-    //writeI2c0Register(addrMCP23008, RegGPIO, 0x00);     // Initialize all GPIO outputs as 0
+    // Soft-start, increase duty cycle from 50% to 95%
+    // NOTE: Starting the motor at 40% duty cycle will not work for most ERB lab motors, so 50% or higher must be utilized
+    int16_t i;
+    for (i = 16000; i < 19000; i = i + 10)
+    {
+      setThreshold(i);
+      waitMicrosecond(5000);
+    }
+
+    while(true)
+    {
+        // Simple algorithm to reverse the motor's direction, slow it down and then speed it up
+        waitMicrosecond(1000000);
+
+        // Reverse direction
+        IN1 ^= 1;
+        IN2 ^= 1;
+
+        // Slow the motor down (90% duty cycle to 50% duty cycle)
+        for (i = 19000; i < 10000; i = i - 10)
+        {
+          setThreshold(i);
+          waitMicrosecond(5000);
+        }
+        waitMicrosecond(1000000);
+
+        // Speed the motor up (50% duty cycle to 90% duty cycle)
+        for (i = 10000; i < 19000; i = i + 10)
+        {
+          setThreshold(i);
+          waitMicrosecond(5000);
+        }
+    }
+
+    /*
+    // Run calculations once to configure dt correctly
+    calculatePitchAndRoll();
+    waitMicrosecond(10000); // Small delay before loop starts
+
 
     while (true)
     {
-        readGyroY();
-        waitMicrosecond(500000);
+        calculatePitchAndRoll();
+        waitMicrosecond(10000);
     }
+    */
 }
 
