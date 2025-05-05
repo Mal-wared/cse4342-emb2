@@ -37,8 +37,12 @@
 
 #define IN1      (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 4*4))) // Port B4
 #define IN2      (*((volatile uint32_t *)(0x42000000 + (0x400053FC-0x40000000)*32 + 5*4))) // Port B5
+#define IN3      (*((volatile uint32_t *)(0x42000000 + (0x400063FC-0x40000000)*32 + 4*4))) // Port C4
+#define IN4      (*((volatile uint32_t *)(0x42000000 + (0x400063FC-0x40000000)*32 + 5*4))) // Port C5
 #define IN1_MASK 16
 #define IN2_MASK 32
+#define IN3_MASK 16
+#define IN4_MASK 32
 
 #define GREEN_LED    (*((volatile uint32_t *)(0x42000000 + (0x400253FC-0x40000000)*32 + 3*4)))
 #define GREEN_LED_MASK 8
@@ -48,6 +52,9 @@
 #define addrMCP23008  0x20 // MCP23008 Address
 #define addrMCP23008  0x20 // MCP23008 Address
 #define RegGPIO  0x09      // GPIO register address
+
+#define PID_KP  2.0f
+#define PID_SP  0.0f
 
 //-----------------------------------------------------------------------------
 // Global variables
@@ -71,13 +78,16 @@ void initHw()
 
     // Configure PF4 for pushbutton using GPIO library
     enablePort(PORTF);                  // Enable Port F
-    enablePort(PORTB);
+    SYSCTL_RCGCGPIO_R |= SYSCTL_RCGCGPIO_R1 | SYSCTL_RCGCGPIO_R2;
+    _delay_cycles(3);
     selectPinDigitalInput(PORTF, 4); // Set PF4 as input               // Enable Port F
     GPIO_PORTF_DIR_R |= GREEN_LED_MASK;
     GPIO_PORTF_DEN_R |= GREEN_LED_MASK;
 
     GPIO_PORTB_DIR_R |= IN1_MASK | IN2_MASK;
     GPIO_PORTB_DEN_R |= IN1_MASK | IN2_MASK;
+    GPIO_PORTC_DIR_R |= IN3_MASK | IN4_MASK;
+    GPIO_PORTC_DEN_R |= IN3_MASK | IN4_MASK;
     enablePinPullup(PORTF, 4);          // Enable pull-up resistor for PF4
 
 }
@@ -168,35 +178,6 @@ void initTimer()
 
     // Enable Timer A
     TIMER1_CTL_R |= TIMER_CTL_TAEN;
-}
-
-void readGyroY()
-{
-    char buffer[32];
-
-    // Ensure we are on BANK0
-    writeI2c0Register(ICM20948_ADDR, REG_BANK_SEL, BANK0);
-    waitMicrosecond(1000);
-
-    // Step 1: Read high byte of Y-axis gyroscope data
-    uint8_t highByte = readI2c0Register(ICM20948_ADDR, GYRO_YOUT_H);
-
-    snprintf(buffer, 32, "GYRO_YOUT_H: %hu\n", highByte);
-    putsUart0(buffer);
-
-    // Step 2: Read low byte of Y-axis gyroscope data
-    uint8_t lowByte = readI2c0Register(ICM20948_ADDR, GYRO_YOUT_L);
-    snprintf(buffer, 32, "GYRO_YOUT_L: %hu\n", lowByte);
-    putsUart0(buffer);
-
-    // Step 3: Combine high and low bytes into a signed 16-bit integer
-    int16_t raw = (highByte << 8) | lowByte;
-
-    // Bonus: Convert raw value to degrees per second
-    float degPerSec = raw / 131.0;
-
-    snprintf(buffer, 32, "GYRO_YOUT: %f\n", degPerSec);
-    putsUart0(buffer);
 }
 
 void getGyroAndAccelerometerValues()
@@ -301,28 +282,47 @@ void calculatePitchAndRoll()
     getGyroAndAccelerometerValues();
 
     float measuredPitchAngle = (atan(acceX / sqrt(acceY * acceY + acceZ * acceZ)) * 1 / (M_PI / 180));
-    float measuredRollAngle = (atan(acceY / sqrt(acceX * acceX + acceZ * acceZ)) * 1 / (M_PI / 180));
+    //float measuredRollAngle = (atan(acceY / sqrt(acceX * acceX + acceZ * acceZ)) * 1 / (M_PI / 180));
 
     float lowpassPitch = pitch * 0.7 + measuredPitchAngle * 0.3;
-    float lowpassRoll = roll * 0.7 + measuredRollAngle * 0.3;
+    //float lowpassRoll = roll * 0.7 + measuredRollAngle * 0.3;
 
     // Complementary filter
 
-    pitch = (0.97f) * (pitch + gyroY * dt) + (lowpassPitch * 0.03f);
-    roll = (0.97f) * (roll + gyroX * dt) + (lowpassRoll * 0.03f);
+    pitch = (0.975f) * (pitch + gyroY * dt) + (lowpassPitch * 0.025f);
+    //roll = (0.97f) * (roll + gyroX * dt) + (lowpassRoll * 0.03f);
 
     char buffer[32];
+    /*
     snprintf(buffer, 32, "dt: %f\n", dt);
-        putsUart0(buffer);
-    snprintf(buffer, 32, "pitch: %f\n", pitch);
     putsUart0(buffer);
     snprintf(buffer, 32, "roll: %f\n", roll);
     putsUart0(buffer);
+    */
+    snprintf(buffer, 32, "pitch: %f\n", pitch);
+    putsUart0(buffer);
 
-}
+    float error = PID_SP - pitch;
+    float output = PID_KP * error;
 
-void runControllerLoop()
-{
+    if(output < 0.0f)
+    {
+        IN1 = 1; IN2 = 0; IN3 = 0; IN4 = 1;
+    }
+    else
+    {
+
+        IN1 = 0; IN2 = 1; IN3 = 1; IN4 = 0;
+
+    }
+
+    float scaledOutput = fabsf(output * 4000.0f);
+    float scaledOutputRounded = roundf(scaledOutput);
+    if(scaledOutputRounded > 19999)
+    {
+        scaledOutputRounded = 19999;
+    }
+    setThreshold(scaledOutputRounded);
 
 }
 
@@ -401,7 +401,7 @@ void testRegisterWhoAmI()
 //-----------------------------------------------------------------------------
 
 int main(void)
-{
+ {
     // interface PID with I2C
     // configure gyro
     // read values from gyro
@@ -424,46 +424,18 @@ int main(void)
     setUart0BaudRate(115200, 40e6);
     testRegisterWhoAmI();
     getGyroCalibrationValues();
-
-    IN1 = 1;
-    IN2 = 0;
     // Set threshold (Duty Cycle = Threshold / Load, Load = 20000)
 
     // Soft-start, increase duty cycle from 50% to 95%
     // NOTE: Starting the motor at 40% duty cycle will not work for most ERB lab motors, so 50% or higher must be utilized
-    int16_t i;
-    for (i = 16000; i < 19000; i = i + 10)
-    {
-      setThreshold(i);
-      waitMicrosecond(5000);
-    }
-
-    while(true)
-    {
-        // Simple algorithm to reverse the motor's direction, slow it down and then speed it up
-        waitMicrosecond(1000000);
-
-        // Reverse direction
-        IN1 ^= 1;
-        IN2 ^= 1;
-
-        // Slow the motor down (90% duty cycle to 50% duty cycle)
-        for (i = 19000; i < 10000; i = i - 10)
-        {
-          setThreshold(i);
-          waitMicrosecond(5000);
-        }
-        waitMicrosecond(1000000);
-
-        // Speed the motor up (50% duty cycle to 90% duty cycle)
-        for (i = 10000; i < 19000; i = i + 10)
-        {
-          setThreshold(i);
-          waitMicrosecond(5000);
-        }
-    }
 
     /*
+    IN1 = 1; IN2 = 0; IN3 = 0; IN4 = 1;
+    setThreshold(16000);
+    while(true);
+    */
+
+
     // Run calculations once to configure dt correctly
     calculatePitchAndRoll();
     waitMicrosecond(10000); // Small delay before loop starts
@@ -474,6 +446,7 @@ int main(void)
         calculatePitchAndRoll();
         waitMicrosecond(10000);
     }
-    */
+
+
 }
 
