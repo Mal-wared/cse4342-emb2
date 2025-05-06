@@ -53,8 +53,8 @@
 #define addrMCP23008  0x20 // MCP23008 Address
 #define RegGPIO  0x09      // GPIO register address
 
-#define PID_KP  2.0f
-#define PID_SP  0.0f
+#define PID_KP  5000.0f
+#define PID_SP  -2.0f
 
 //-----------------------------------------------------------------------------
 // Global variables
@@ -289,7 +289,7 @@ void calculatePitchAndRoll()
 
     // Complementary filter
 
-    pitch = (0.975f) * (pitch + gyroY * dt) + (lowpassPitch * 0.025f);
+    pitch = (0.96f) * (pitch + gyroY * dt) + (lowpassPitch * 0.04f);
     //roll = (0.97f) * (roll + gyroX * dt) + (lowpassRoll * 0.03f);
 
     char buffer[32];
@@ -316,7 +316,7 @@ void calculatePitchAndRoll()
 
     }
 
-    float scaledOutput = fabsf(output * 4000.0f);
+    float scaledOutput = fabsf(output);
     float scaledOutputRounded = roundf(scaledOutput);
     if(scaledOutputRounded > 19999)
     {
